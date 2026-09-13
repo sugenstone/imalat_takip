@@ -1,0 +1,20 @@
+# --- Rust ---
+backend/target/
+
+# --- Node / SvelteKit ---
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vite/
+
+# --- SIRLI / CANLI VERI (asla commit etme!) ---
+backend/.env
+backend/data/
+
+# --- Yerel arac state ---
+.zcode/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
