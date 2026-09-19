@@ -1,22 +1,24 @@
 <script lang="ts">
 	import { api } from '$lib/api/client';
-	import type { Member, Role, Section, Team, WorkType, WorkflowTemplate } from '$lib/api/types';
+	import type { Member, Role, Section, Team, WorkType, WorkflowTemplate, StepDefinition } from '$lib/api/types';
 	import { page } from '$app/state';
 	import MembersPanel from '$lib/components/settings/MembersPanel.svelte';
 	import RolesPanel from '$lib/components/settings/RolesPanel.svelte';
 	import TeamsPanel from '$lib/components/settings/TeamsPanel.svelte';
 	import WorkTypesPanel from '$lib/components/settings/WorkTypesPanel.svelte';
 	import WorkflowsPanel from '$lib/components/settings/WorkflowsPanel.svelte';
+	import StepsPanel from '$lib/components/settings/StepsPanel.svelte';
 	import AuditPanel from '$lib/components/settings/AuditPanel.svelte';
 	import EmailsPanel from '$lib/components/settings/EmailsPanel.svelte';
 
-	let tab = $state<'uyeler' | 'roller' | 'takimlar' | 'is-tipleri' | 'akislar' | 'aktivite' | 'eposta'>('uyeler');
+	let tab = $state<'uyeler' | 'adimlar' | 'gruplar' | 'roller' | 'takimlar' | 'is-tipleri' | 'aktivite' | 'eposta'>('adimlar');
 	let members = $state<Member[]>([]);
 	let roles = $state<Role[]>([]);
 	let teams = $state<Team[]>([]);
 	let sections = $state<Section[]>([]);
 	let workTypes = $state<WorkType[]>([]);
 	let workflows = $state<WorkflowTemplate[]>([]);
+	let steps = $state<StepDefinition[]>([]);
 	let loading = $state(true);
 
 	const wid = $derived(page.params.id ?? '');
@@ -29,20 +31,22 @@
 	async function load() {
 		loading = true;
 		try {
-			const [m, r, t, s, wt, wfl] = await Promise.all([
+			const [m, r, t, sec, wt, wfl, st] = await Promise.all([
 				api.get<Member[]>(`/workspaces/${wid}/members`),
 				api.get<Role[]>(`/workspaces/${wid}/roles`),
 				api.get<Team[]>(`/workspaces/${wid}/teams`),
 				api.get<Section[]>(`/workspaces/${wid}/sections`),
 				api.get<WorkType[]>(`/workspaces/${wid}/work-types`),
-				api.get<WorkflowTemplate[]>(`/workspaces/${wid}/workflows`)
+				api.get<WorkflowTemplate[]>(`/workspaces/${wid}/workflows`),
+				api.get<StepDefinition[]>(`/workspaces/${wid}/steps`)
 			]);
 			members = m;
 			roles = r;
 			teams = t;
-			sections = s;
+			sections = sec;
 			workTypes = wt;
 			workflows = wfl;
+			steps = st;
 		} catch {
 			/* layout hatayi gosterir */
 		} finally {
@@ -52,10 +56,11 @@
 
 	const tabs = [
 		{ id: 'uyeler', label: 'Üyeler' },
+		{ id: 'adimlar', label: 'Adımlar' },
+		{ id: 'gruplar', label: 'Süreç Grupları' },
 		{ id: 'roller', label: 'Roller' },
 		{ id: 'takimlar', label: 'Takımlar' },
 		{ id: 'is-tipleri', label: 'İş Tipleri' },
-		{ id: 'akislar', label: 'Akışlar' },
 		{ id: 'aktivite', label: 'Aktivite' },
 		{ id: 'eposta', label: 'E-posta' }
 	] as const;
@@ -84,14 +89,16 @@
 
 	{#if tab === 'uyeler'}
 		<MembersPanel {wid} {members} {roles} {sections} reload={load} />
+	{:else if tab === 'adimlar'}
+		<StepsPanel {wid} {steps} {members} {teams} {roles} reload={load} />
 	{:else if tab === 'roller'}
 		<RolesPanel {wid} {roles} reload={load} />
 	{:else if tab === 'takimlar'}
 		<TeamsPanel {wid} {teams} {members} reload={load} />
 	{:else if tab === 'is-tipleri'}
 		<WorkTypesPanel {wid} {workTypes} reload={load} />
-	{:else if tab === 'akislar'}
-		<WorkflowsPanel {wid} {workflows} reload={load} />
+	{:else if tab === 'gruplar'}
+		<WorkflowsPanel {wid} {workflows} {steps} reload={load} />
 	{:else if tab === 'aktivite'}
 		<AuditPanel {wid} />
 	{:else}

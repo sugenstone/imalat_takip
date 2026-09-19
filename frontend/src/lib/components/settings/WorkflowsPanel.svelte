@@ -1,25 +1,83 @@
 <script lang="ts">
 	import { api, ApiError } from '$lib/api/client';
-	import type { WorkflowTemplate, WorkflowDraft, WorkflowNode, WorkflowDependency, WorkflowVersion, Role, Member, Team } from '$lib/api/types';
+	import type { WorkflowTemplate, WorkflowDraft, WorkflowNode, WorkflowDependency, WorkflowVersion, Role, Member, Team, StepDefinition } from '$lib/api/types';
 	import Sheet from '$lib/components/Sheet.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 
 	let {
 		wid,
 		workflows,
+		steps,
 		reload
 	}: {
 		wid: string;
 		workflows: WorkflowTemplate[];
+		steps: StepDefinition[];
 		reload: () => Promise<void>;
 	} = $props();
 
-	let createOpen = $state(false);
 	let editTemplate = $state<WorkflowTemplate | null>(null);
 	let wfName = $state('');
 	let wfDesc = $state('');
 	let busy = $state(false);
 	let error = $state('');
+
+	// Yeni Grup: havuzdan adim secimi (sirali)
+	let groupOpen = $state(false);
+	let groupName = $state('');
+	let groupSearch = $state('');
+	let selected = $state<StepDefinition[]>([]);
+
+	const availableSteps = $derived(
+		steps.filter(
+			(s) =>
+				!selected.some((x) => x.id === s.id) &&
+				(groupSearch.trim() === '' || s.name.toLowerCase().includes(groupSearch.trim().toLowerCase()))
+		)
+	);
+
+	function openGroup() {
+		error = '';
+		groupName = '';
+		groupSearch = '';
+		selected = [];
+		groupOpen = true;
+	}
+
+	function addStep(s: StepDefinition) {
+		selected = [...selected, s];
+	}
+
+	function removeStep(i: number) {
+		selected = selected.filter((_, idx) => idx !== i);
+	}
+
+	function moveStep(i: number, dir: -1 | 1) {
+		const j = i + dir;
+		if (j < 0 || j >= selected.length) return;
+		const next = [...selected];
+		[next[i], next[j]] = [next[j], next[i]];
+		selected = next;
+	}
+
+	async function submitGroup(e: SubmitEvent) {
+		e.preventDefault();
+		error = '';
+		busy = true;
+		try {
+			await api.post(`/workspaces/${wid}/step-groups`, {
+				name: groupName.trim(),
+				step_ids: selected.map((s) => s.id)
+			});
+			groupOpen = false;
+			await reload();
+		} catch (err) {
+			error = err instanceof ApiError ? err.message : 'Grup oluşturulamadı';
+		} finally {
+			busy = false;
+		}
+	}
 
 	// Editor durumu
 	let editorOpen = $state(false);
@@ -74,13 +132,6 @@
 		})();
 	});
 
-	function openCreate() {
-		error = '';
-		wfName = '';
-		wfDesc = '';
-		createOpen = true;
-	}
-
 	function openEditTemplate(t: WorkflowTemplate) {
 		error = '';
 		wfName = t.name;
@@ -99,12 +150,6 @@
 					description: wfDesc || null
 				});
 				editTemplate = null;
-			} else {
-				await api.post(`/workspaces/${wid}/workflows`, {
-					name: wfName,
-					description: wfDesc || null
-				});
-				createOpen = false;
 			}
 			await reload();
 		} catch (err) {
@@ -339,8 +384,8 @@
 </script>
 
 <div class="mb-3 flex items-center justify-between">
-	<h2 class="font-semibold">Akışlar ({workflows.length})</h2>
-	<button type="button" class="btn-secondary !min-h-9 !px-3 !text-xs" onclick={openCreate}>+ Ekle</button>
+	<h2 class="font-semibold">Süreç Grupları ({workflows.length})</h2>
+	<button type="button" class="btn-primary !min-h-9 !px-3 !text-xs" onclick={openGroup}>+ Yeni Grup</button>
 </div>
 
 {#if error}
@@ -351,10 +396,10 @@
 	<div class="card">
 		<EmptyState
 			icon="workflow"
-			title="Henüz akış yok"
-			description="Adımlardan ve bağımlılıklardan akışlar kurun: Taş Alımı › Kesim › İmalat… Paralel dallar desteklenir."
-			actionLabel="Akış Oluştur"
-			onaction={openCreate}
+			title="Henüz süreç grubu yok"
+			description="Adım Havuzu'ndan adım seçip isimli bir grup kurun: Kesim › Montaj › Kontrol. Grubu bir işe eklediğinizde adımlar ve sorumlular tek seferde gelir."
+			actionLabel="Grup Oluştur"
+			onaction={openGroup}
 		/>
 	</div>
 {:else}
@@ -396,34 +441,98 @@
 	</div>
 {/if}
 
-<!-- Akis olustur/duzenle -->
-<Sheet bind:open={createOpen} title="Yeni Akış">
-	<form class="space-y-4" onsubmit={saveTemplate}>
+<!-- Yeni Surec Grubu: havuzdan adim sec -->
+<Sheet bind:open={groupOpen} title="Yeni Süreç Grubu">
+	<form class="space-y-4" onsubmit={submitGroup}>
 		<div>
-			<label class="label" for="wf-name">Akış Adı</label>
-			<input id="wf-name" class="input" bind:value={wfName} placeholder="Örn. Standart Üretim" required maxlength={80} />
+			<label class="label" for="grp-name">Grup Adı</label>
+			<input id="grp-name" class="input" bind:value={groupName} placeholder="Örn. Mutfak Tezgahı, Standart Üretim" required maxlength={80} />
 		</div>
+
+		{#if selected.length > 0}
+			<div class="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3">
+				<p class="mb-2 text-xs font-semibold uppercase tracking-wide text-indigo-700">Sıra ({selected.length} adım)</p>
+				<div class="space-y-1.5">
+					{#each selected as s, i (s.id)}
+						<div class="flex items-center gap-2 rounded-lg bg-white px-3 py-2 shadow-sm">
+							<span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-[11px] font-bold text-indigo-700">{i + 1}</span>
+							<div class="min-w-0 flex-1">
+								<p class="truncate text-sm font-medium">{s.name}</p>
+								{#if s.default_assignee_type}
+									<p class="truncate text-[11px] text-slate-400">sorumlu tanımlı{#if s.requires_approval} · onaylı{/if}</p>
+								{:else if s.requires_approval}
+									<p class="truncate text-[11px] text-slate-400">onaylı</p>
+								{/if}
+							</div>
+							<button type="button" class="flex size-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 disabled:opacity-30" onclick={() => moveStep(i, -1)} disabled={i === 0} aria-label="Yukarı">
+								<Icon name="chevron-up" size={15} />
+							</button>
+							<button type="button" class="flex size-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 disabled:opacity-30" onclick={() => moveStep(i, 1)} disabled={i === selected.length - 1} aria-label="Aşağı">
+								<Icon name="chevron-down" size={15} />
+							</button>
+							<button type="button" class="flex size-8 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600" onclick={() => removeStep(i)} aria-label="Çıkar">
+								<Icon name="x" size={15} />
+							</button>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
 		<div>
-			<label class="label" for="wf-desc">Açıklama</label>
-			<input id="wf-desc" class="input" bind:value={wfDesc} maxlength={200} />
+			<span class="label">Adım Havuzu'ndan ekle</span>
+			{#if steps.length === 0}
+				<p class="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+					Adım havuzu boş. Önce <strong>Adımlar</strong> sekmesinde adım tanımlayın.
+				</p>
+			{:else}
+				<div class="relative mb-2">
+					<Icon name="search" size={15} class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-slate-400" />
+					<input class="input !pl-9" placeholder="Adım ara…" bind:value={groupSearch} />
+				</div>
+				<div class="max-h-56 space-y-1 overflow-y-auto">
+					{#each availableSteps as s (s.id)}
+						<button
+							type="button"
+							class="flex w-full items-center gap-2.5 rounded-lg bg-white px-3 py-2 text-left ring-1 ring-slate-200 hover:ring-indigo-300"
+							onclick={() => addStep(s)}
+						>
+							<Icon name="plus" size={15} class="shrink-0 text-indigo-600" />
+							<div class="min-w-0 flex-1">
+								<p class="truncate text-sm font-medium">{s.name}</p>
+								{#if s.default_assignee_type || s.requires_approval}
+									<p class="truncate text-[11px] text-slate-400">
+										{#if s.default_assignee_type}varsayılan sorumlu{/if}
+										{#if s.default_assignee_type && s.requires_approval} · {/if}
+										{#if s.requires_approval}onaylı{/if}
+									</p>
+								{/if}
+							</div>
+						</button>
+					{:else}
+						<p class="py-3 text-center text-xs text-slate-400">Eklenecek adım kalmadı</p>
+					{/each}
+				</div>
+			{/if}
 		</div>
+
 		{#if error}
 			<p class="form-error" role="alert">{error}</p>
 		{/if}
 		<div class="flex gap-2">
-			<button type="button" class="btn-secondary flex-1" onclick={() => (createOpen = false)}>İptal</button>
-			<button type="submit" class="btn-primary flex-1" disabled={busy || !wfName.trim()}>
-				{busy ? 'Oluşturuluyor…' : 'Oluştur'}
+			<button type="button" class="btn-secondary flex-1" onclick={() => (groupOpen = false)}>İptal</button>
+			<button type="submit" class="btn-primary flex-1" disabled={busy || !groupName.trim() || selected.length === 0}>
+				{busy ? 'Oluşturuluyor…' : 'Grubu Oluştur'}
 			</button>
 		</div>
 	</form>
 </Sheet>
 
-<Sheet open={editTemplate !== null && !editorOpen} title={editTemplate ? `Akış: ${editTemplate.name}` : ''} onclose={() => (editTemplate = null)}>
+<Sheet open={editTemplate !== null && !editorOpen} title={editTemplate ? `Süreç Grubu: ${editTemplate.name}` : ''} onclose={() => (editTemplate = null)}>
 	{#if editTemplate}
 		<form class="space-y-4" onsubmit={saveTemplate}>
 			<div>
-				<label class="label" for="et-wf-name">Akış Adı</label>
+				<label class="label" for="et-wf-name">Grup Adı</label>
 				<input id="et-wf-name" class="input" bind:value={wfName} required maxlength={80} />
 			</div>
 			<div>
@@ -441,7 +550,7 @@
 </Sheet>
 
 <!-- EDITOR: draft adimlari -->
-<Sheet bind:open={editorOpen} title={editTemplate ? `${editTemplate.name} — Taslak v${draft?.version_number ?? '?'}` : 'Akış Editörü'} onclose={() => (editorOpen = false)}>
+<Sheet bind:open={editorOpen} title={editTemplate ? `${editTemplate.name} — Gelişmiş Düzenle (Taslak v${draft?.version_number ?? '?'})` : 'Süreç Grubu Editörü'} onclose={() => (editorOpen = false)}>
 	<div class="space-y-3">
 		<p class="text-xs text-slate-500">
 			Adımları ekleyin, her adımın <strong>önceki adımlarını</strong> seçerek akışı kurun.

@@ -60,6 +60,9 @@ pub struct CreateItemReq {
     auto_workflow: bool,
     #[serde(default)]
     work_type_id: Option<String>,
+    /// Secili surec grubunu (workflow template) olusturulan kaleme ata
+    #[serde(default)]
+    pub workflow_template_id: Option<String>,
     name: String,
     #[serde(default)]
     description: Option<String>,
@@ -575,7 +578,10 @@ pub async fn create(
     tx.commit().await?;
 
     // Tipin varsayilan akisi varsa otomatik ata (gercek senaryo paketi)
-    if req.auto_workflow {
+    // Surec grubu secilmisse dogrudan ata (tip varsayilini one alir)
+    if let Some(tid) = &req.workflow_template_id {
+        assign_workflow_to_item(&state.db, &wid, &id, tid, &user.0.id).await;
+    } else if req.auto_workflow {
         if let Some(tid) = &req.work_type_id {
             auto_assign_workflow(&state.db, &wid, &id, tid, &user.0.id).await;
         }
@@ -626,7 +632,44 @@ pub async fn auto_assign_workflow(
     let Some((_, version_id)) = default_workflow_for_type(db, work_type_id).await else {
         return false;
     };
-    // Zaten aktif instance var mi?
+    spawn_if_free(db, wid, iid, &version_id, user_id).await
+}
+
+/// Secili surec grubunun (template) yayinlanmis son versiyonunu is kalemine atar.
+/// Grubu olusturan islemlerde kullanilir; aktif instance varsa dokunmaz.
+pub async fn assign_workflow_to_item(
+    db: &sqlx::SqlitePool,
+    wid: &str,
+    iid: &str,
+    template_id: &str,
+    user_id: &str,
+) -> bool {
+    // Template bu workspace'e mi ait + published versiyon
+    let v: Option<(String,)> = sqlx::query_as(
+        "SELECT v.id FROM workflow_versions v
+         JOIN workflow_templates t ON t.id = v.template_id
+         WHERE v.template_id = ?1 AND t.workspace_id = ?2 AND v.status = 'published'
+           AND t.status = 'active'
+         ORDER BY v.version_number DESC LIMIT 1",
+    )
+    .bind(template_id)
+    .bind(wid)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some((version_id,)) = v else { return false };
+    spawn_if_free(db, wid, iid, &version_id, user_id).await
+}
+
+/// Aktif instance yoksa spawn; varsa dokunma (best-effort).
+async fn spawn_if_free(
+    db: &sqlx::SqlitePool,
+    wid: &str,
+    iid: &str,
+    version_id: &str,
+    user_id: &str,
+) -> bool {
     let active: Option<(String,)> = sqlx::query_as(
         "SELECT id FROM workflow_instances WHERE work_item_id = ?1 AND status = 'active'",
     )
@@ -638,7 +681,7 @@ pub async fn auto_assign_workflow(
     if active.is_some() {
         return false;
     }
-    crate::workflow_runtime::spawn_instance(db, wid, iid, &version_id, user_id)
+    crate::workflow_runtime::spawn_instance(db, wid, iid, version_id, user_id)
         .await
         .is_ok()
 }
@@ -654,6 +697,9 @@ pub struct DistributeReq {
     /// Tipin varsayilan akisi varsa otomatik ata
     #[serde(default)]
     auto_workflow: bool,
+    /// Secili surec grubunu (workflow template) her olusan kaleme ata
+    #[serde(default)]
+    pub workflow_template_id: Option<String>,
     #[serde(default)]
     priority: Option<String>,
     #[serde(default)]
@@ -873,19 +919,25 @@ pub async fn create_distribute(
         .bind(&now)
         .execute(&mut *tx)
         .await?;
-        if req.auto_workflow {
+        if req.workflow_template_id.is_some() || req.auto_workflow {
             auto_ids.push((id, req.work_type_id.clone()));
         }
     }
     tx.commit().await?;
 
     // Otomatik akis atamalari — tx DISINDA (tek baglanti kilidi dersi, Faz 5)
+    // Surec grubu secilmisse grup one alir; degilse tipin varsayilini dener.
     let mut auto_count = 0i64;
     for (iid, tid) in &auto_ids {
-        if let Some(tid) = tid {
-            if auto_assign_workflow(&state.db, &wid, iid, tid, &user.0.id).await {
-                auto_count += 1;
-            }
+        let assigned = if let Some(gid) = &req.workflow_template_id {
+            assign_workflow_to_item(&state.db, &wid, iid, gid, &user.0.id).await
+        } else if let Some(tid) = tid {
+            auto_assign_workflow(&state.db, &wid, iid, tid, &user.0.id).await
+        } else {
+            false
+        };
+        if assigned {
+            auto_count += 1;
         }
     }
 

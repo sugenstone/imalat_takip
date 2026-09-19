@@ -843,8 +843,138 @@ pub struct QuickFlowReq {
     assign_to_item_id: Option<String>,
 }
 
+/// Zincir akis kurulum spesifikasyonu: quick-flow ve surec grubu ortak kullanir.
+pub struct FlowStepSpec {
+    pub name: String,
+    pub requires_approval: bool,
+    pub approver_role_id: Option<String>,
+    pub default_assignee_type: Option<String>,
+    pub default_assignee_id: Option<String>,
+}
+
+/// Adimlari sirali zincir (lineer DAG) olarak template + v1 versiyon + node'lar
+/// + bagimliliklar ile kurar ve v1'i yayinlar, bos draft v2 birakir.
+/// Tek tx icinde calisir; version_id dondurur.
+async fn create_flow_chain(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    wid: &str,
+    name: &str,
+    steps: &[FlowStepSpec],
+    user_id: &str,
+    now: &str,
+) -> AppResult<String> {
+    let tfid = util::new_id();
+
+    // 1) Template
+    sqlx::query(
+        "INSERT INTO workflow_templates (id, workspace_id, name, status, created_by, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5)",
+    )
+    .bind(&tfid)
+    .bind(wid)
+    .bind(name)
+    .bind(user_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    // 2) Versiyon (draft) + adimlar + zincir bagimliliklar
+    let version_id = util::new_id();
+    sqlx::query(
+        "INSERT INTO workflow_versions (id, template_id, version_number, status, created_at)
+         VALUES (?1, ?2, 1, 'draft', ?3)",
+    )
+    .bind(&version_id)
+    .bind(&tfid)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+
+    let mut prev_node: Option<String> = None;
+    for (i, st) in steps.iter().enumerate() {
+        let node_id = util::new_id();
+        let has_assignee = st.default_assignee_type.is_some() && st.default_assignee_id.is_some();
+        if st.requires_approval || has_assignee {
+            let rule: Option<String> = if st.requires_approval {
+                Some(
+                    serde_json::json!({
+                        "required": true,
+                        "approver_role_id": st.approver_role_id
+                    })
+                    .to_string(),
+                )
+            } else {
+                None
+            };
+            sqlx::query(
+                "INSERT INTO workflow_nodes (id, version_id, name, node_type, sort_order, approval_rule_json, default_assignee_type, default_assignee_id, created_at)
+                 VALUES (?1, ?2, ?3, 'process', ?4, ?5, ?6, ?7, ?8)",
+            )
+            .bind(&node_id)
+            .bind(&version_id)
+            .bind(st.name.trim())
+            .bind((i + 1) as i64)
+            .bind(&rule)
+            .bind(&st.default_assignee_type)
+            .bind(&st.default_assignee_id)
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO workflow_nodes (id, version_id, name, node_type, sort_order, created_at)
+                 VALUES (?1, ?2, ?3, 'process', ?4, ?5)",
+            )
+            .bind(&node_id)
+            .bind(&version_id)
+            .bind(st.name.trim())
+            .bind((i + 1) as i64)
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        if let Some(p) = &prev_node {
+            sqlx::query(
+                "INSERT INTO workflow_dependencies (id, version_id, predecessor_node_id, successor_node_id, dependency_type, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'all_completed', ?5)",
+            )
+            .bind(util::new_id())
+            .bind(&version_id)
+            .bind(p)
+            .bind(&node_id)
+            .bind(now)
+            .execute(&mut **tx)
+            .await?;
+        }
+        prev_node = Some(node_id);
+    }
+
+    // 3) Yayinla
+    sqlx::query(
+        "UPDATE workflow_versions SET status = 'published', published_at = ?1, published_by = ?2 WHERE id = ?3",
+    )
+    .bind(now)
+    .bind(user_id)
+    .bind(&version_id)
+    .execute(&mut **tx)
+    .await?;
+
+    // Yeni bos draft (v2) birak
+    sqlx::query(
+        "INSERT INTO workflow_versions (id, template_id, version_number, status, created_at)
+         VALUES (?1, ?2, 2, 'draft', ?3)",
+    )
+    .bind(util::new_id())
+    .bind(&tfid)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(version_id)
+}
+
 /// Hizli akis: adimlari sirali zincir olarak kurar, yayinlar, (istendiyse) is kalemine atar.
-/// Paralel dallar ve detayli kurallar icin Ayarlar > Akislar'daki gelismis editor gecerlidir.
+/// Paralel dallar ve detayli kurallar icin Ayarlar > Surec Gruplari'ndaki gelismis editor gecerlidir.
 pub async fn quick_flow(
     State(state): State<AppState>,
     user: AuthUser,
@@ -885,114 +1015,30 @@ pub async fn quick_flow(
         }
     }
 
+    let specs: Vec<FlowStepSpec> = req
+        .steps
+        .iter()
+        .map(|st| FlowStepSpec {
+            name: st.name.trim().to_string(),
+            requires_approval: st.requires_approval,
+            approver_role_id: st.approver_role_id.clone(),
+            default_assignee_type: None,
+            default_assignee_id: None,
+        })
+        .collect();
+
     let now = util::now();
-    let tfid = util::new_id();
     let mut tx = state.db.begin().await?;
-
-    // 1) Template
-    sqlx::query(
-        "INSERT INTO workflow_templates (id, workspace_id, name, status, created_by, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5)",
-    )
-    .bind(&tfid)
-    .bind(&wid)
-    .bind(&name)
-    .bind(&user.0.id)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-
-    // 2) Versiyon (draft) + adimlar + zincir bagimliliklar
-    let version_id = util::new_id();
-    sqlx::query(
-        "INSERT INTO workflow_versions (id, template_id, version_number, status, created_at)
-         VALUES (?1, ?2, 1, 'draft', ?3)",
+    let version_id = create_flow_chain(&mut tx, &wid, &name, &specs, &user.0.id, &now).await?;
+    let tfid: (String,) = sqlx::query_as(
+        "SELECT template_id FROM workflow_versions WHERE id = ?1",
     )
     .bind(&version_id)
-    .bind(&tfid)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-
-    let mut prev_node: Option<String> = None;
-    for (i, st) in req.steps.iter().enumerate() {
-        let node_id = util::new_id();
-        let approval = if st.requires_approval {
-            serde_json::json!({ "required": true }).to_string()
-        } else {
-            "NULL".to_string()
-        };
-        let _ = approval;
-        if st.requires_approval {
-            let rule = serde_json::json!({
-                "required": true,
-                "approver_role_id": st.approver_role_id
-            });
-            sqlx::query(
-                "INSERT INTO workflow_nodes (id, version_id, name, node_type, sort_order, approval_rule_json, created_at)
-                 VALUES (?1, ?2, ?3, 'process', ?4, ?5, ?6)",
-            )
-            .bind(&node_id)
-            .bind(&version_id)
-            .bind(st.name.trim())
-            .bind((i + 1) as i64)
-            .bind(rule.to_string())
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                "INSERT INTO workflow_nodes (id, version_id, name, node_type, sort_order, created_at)
-                 VALUES (?1, ?2, ?3, 'process', ?4, ?5)",
-            )
-            .bind(&node_id)
-            .bind(&version_id)
-            .bind(st.name.trim())
-            .bind((i + 1) as i64)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        if let Some(p) = &prev_node {
-            sqlx::query(
-                "INSERT INTO workflow_dependencies (id, version_id, predecessor_node_id, successor_node_id, dependency_type, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 'all_completed', ?5)",
-            )
-            .bind(util::new_id())
-            .bind(&version_id)
-            .bind(p)
-            .bind(&node_id)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        }
-        prev_node = Some(node_id);
-    }
-
-    // 3) Yayinla
-    sqlx::query(
-        "UPDATE workflow_versions SET status = 'published', published_at = ?1, published_by = ?2 WHERE id = ?3",
-    )
-    .bind(&now)
-    .bind(&user.0.id)
-    .bind(&version_id)
-    .execute(&mut *tx)
-    .await?;
-
-    // Yeni bos draft (v2) birak
-    sqlx::query(
-        "INSERT INTO workflow_versions (id, template_id, version_number, status, created_at)
-         VALUES (?1, ?2, 2, 'draft', ?3)",
-    )
-    .bind(util::new_id())
-    .bind(&tfid)
-    .bind(&now)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
 
-    crate::audit::audit(&state.db, &wid, Some(&user.0.id), "workflow.published", "workflow_template", &tfid,
+    crate::audit::audit(&state.db, &wid, Some(&user.0.id), "workflow.published", "workflow_template", &tfid.0,
         serde_json::json!({ "version": 1, "via": "quick-flow", "steps": req.steps.len() })).await;
 
     // 4) Is kalemine ata (tx disinda — spawn_instance kendi tx acar)
@@ -1018,9 +1064,100 @@ pub async fn quick_flow(
     }
 
     Ok(Json(serde_json::json!({
-        "template_id": tfid,
+        "template_id": tfid.0,
         "published_version": 1,
         "assigned": assigned
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Surec Grubu: adim havuzundan secilen adimlarla yayinlanmis zincir akis kurar.
+// Adimlarin varsayilan sorumlulari/onay kurallari havuzdan kopyalanir.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct StepGroupReq {
+    name: String,
+    /// Havuz adimlarinin id'leri — ekleme sirasi grup sirasidir
+    step_ids: Vec<String>,
+}
+
+pub async fn create_step_group(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(wid): Path<String>,
+    Json(req): Json<StepGroupReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let ctx = WsCtx::load(&state.db, &user, &wid).await?;
+    ctx.require("workflow.create")?;
+
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.len() > 80 {
+        return Err(AppError::BadRequest("Grup adi 1-80 karakter olmali".into()));
+    }
+    if req.step_ids.is_empty() || req.step_ids.len() > 20 {
+        return Err(AppError::BadRequest("1-20 adim secin".into()));
+    }
+
+    // Havuzdan adimlari SIRASIYLA cek (id tekrarina izin yok)
+    let mut seen = std::collections::HashSet::new();
+    for sid in &req.step_ids {
+        if !seen.insert(sid) {
+            return Err(AppError::BadRequest("Ayni adim birden fazla secilemez".into()));
+        }
+    }
+    let mut specs: Vec<FlowStepSpec> = Vec::with_capacity(req.step_ids.len());
+    for sid in &req.step_ids {
+        let row: Option<(String, bool, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT name, requires_approval, approver_role_id, default_assignee_type, default_assignee_id
+                 FROM step_definitions
+                 WHERE id = ?1 AND workspace_id = ?2 AND archived_at IS NULL",
+            )
+            .bind(sid)
+            .bind(&wid)
+            .fetch_optional(&state.db)
+            .await?;
+        let (sname, approval, role, atype, aid) = row
+            .ok_or_else(|| AppError::BadRequest("Adim havuzunda bulunamadi (veya arsivli)".into()))?;
+        specs.push(FlowStepSpec {
+            name: sname,
+            requires_approval: approval,
+            approver_role_id: role,
+            default_assignee_type: atype,
+            default_assignee_id: aid,
+        });
+    }
+
+    // Ayni adda template var mi? (workflow_templates UNIQUE(workspace_id, name))
+    let dup: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM workflow_templates WHERE workspace_id = ?1 AND name = ?2 AND status = 'active'",
+    )
+    .bind(&wid)
+    .bind(&name)
+    .fetch_optional(&state.db)
+    .await?;
+    if dup.is_some() {
+        return Err(AppError::Conflict("Bu adda bir surec grubu zaten var".into()));
+    }
+
+    let now = util::now();
+    let mut tx = state.db.begin().await?;
+    let version_id = create_flow_chain(&mut tx, &wid, &name, &specs, &user.0.id, &now).await?;
+    let tfid: (String,) = sqlx::query_as(
+        "SELECT template_id FROM workflow_versions WHERE id = ?1",
+    )
+    .bind(&version_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    crate::audit::audit(&state.db, &wid, Some(&user.0.id), "workflow.published", "workflow_template", &tfid.0,
+        serde_json::json!({ "version": 1, "via": "step-group", "steps": specs.len() })).await;
+
+    Ok(Json(serde_json::json!({
+        "template_id": tfid.0,
+        "published_version": 1
     })))
 }
 
@@ -1063,6 +1200,7 @@ pub fn router() -> Router<AppState> {
             routing::post(publish),
         )
         .route("/workspaces/{wid}/quick-flow", routing::post(quick_flow))
+        .route("/workspaces/{wid}/step-groups", routing::post(create_step_group))
         .route(
             "/workspaces/{wid}/workflows/{tfid}/versions",
             routing::get(list_versions),

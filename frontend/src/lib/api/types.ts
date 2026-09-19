@@ -184,6 +184,18 @@ export interface WorkflowTemplate {
 	draft_node_count: number | null;
 }
 
+/** Adim Havuzu: yeniden kullanilabilir surec adimi (varsayilan sorumlu + onay kurali) */
+export interface StepDefinition {
+	id: string;
+	name: string;
+	description: string | null;
+	default_assignee_type: string | null;
+	default_assignee_id: string | null;
+	requires_approval: boolean;
+	approver_role_id: string | null;
+	sort_order: number;
+}
+
 export interface WorkflowNode {
 	id: string;
 	name: string;

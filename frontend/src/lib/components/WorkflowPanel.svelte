@@ -20,7 +20,6 @@
 	// Rol bazli aksiyon gorunurlugu: isci yalniz saha aksiyonlari gorur
 	const canRework = $derived(ws.can('process.rework'));
 	const canAssignFlow = $derived(ws.can('workflow.assign'));
-	const canQuickFlow = $derived(ws.can('workflow.create'));
 	const canAssignProcess = $derived(ws.can('process.assign'));
 
 	let instance = $state<WorkflowInstance | null>(null);
@@ -40,12 +39,6 @@
 	let rejectSheetOpen = $state(false);
 	let rejectTarget = $state<ProcessInstance | null>(null);
 	let rejectNote = $state('');
-
-	// Hizli akis olusturma (quick-flow)
-	let quickOpen = $state(false);
-	let qfName = $state('');
-	let qfSteps = $state<{ name: string; approval: boolean }[]>([]);
-	let qfInput = $state('');
 
 	// Surec yorumlari (Faz 8)
 	let commentsSheetOpen = $state(false);
@@ -217,61 +210,7 @@
 		}
 	}
 
-	// --- Hizli akis ---
-	function openQuick() {
-		error = '';
-		qfName = '';
-		qfSteps = [];
-		qfInput = '';
-		quickOpen = true;
-	}
-
-	function qfAdd() {
-		const n = qfInput.trim();
-		if (!n || qfSteps.length >= 20) return;
-		qfSteps = [...qfSteps, { name: n, approval: false }];
-		qfInput = '';
-	}
-
-	function qfRemove(i: number) {
-		qfSteps = qfSteps.filter((_, idx) => idx !== i);
-	}
-
-	function qfMoveUp(i: number) {
-		if (i === 0) return;
-		const next = [...qfSteps];
-		[next[i - 1], next[i]] = [next[i], next[i - 1]];
-		qfSteps = next;
-	}
-
-	function qfToggleApproval(i: number) {
-		const next = [...qfSteps];
-		next[i] = { ...next[i], approval: !next[i].approval };
-		qfSteps = next;
-	}
-
-	async function submitQuick(e: SubmitEvent) {
-		e.preventDefault();
-		if (!qfName.trim() || qfSteps.length === 0) return;
-		error = '';
-		busy = true;
-		try {
-			await api.post(`/workspaces/${wid}/quick-flow`, {
-				name: qfName.trim(),
-				steps: qfSteps.map((s2) => ({
-					name: s2.name,
-					requires_approval: s2.approval
-				})),
-				assign_to_item_id: itemId
-			});
-			quickOpen = false;
-			await load();
-		} catch (err) {
-			error = err instanceof ApiError ? err.message : 'Oluşturulamadı';
-		} finally {
-			busy = false;
-		}
-	}
+	// --- Hizli akis (kaldi) ---
 
 	function predNames(p: ProcessInstance): string[] {
 		if (!instance || !p.predecessor_ids) return [];
@@ -460,45 +399,28 @@
 			</ul>
 		</div>
 	{/if}
-{:else if !canAssignFlow && !canQuickFlow}
+{:else if !canAssignFlow}
 	<!-- Isci: akis atanmamis — yonetim aksiyonu yok, sade bilgi -->
 	<div class="card text-center">
 		<p class="text-sm text-slate-600">Bu işe henüz iş sırası atanmamış.</p>
 		<p class="mt-1 text-xs text-slate-400">Yönetici atadığında adımlar burada görünür.</p>
 	</div>
 {:else}
-	<!-- Atama bekleniyor -->
+	<!-- Surec grubu sec -->
 	<div class="card">
-		{#if canQuickFlow}
-			<button
-				type="button"
-				class="flex w-full items-center gap-3 rounded-xl bg-indigo-600 px-4 py-4 text-left text-white shadow-sm transition-all hover:bg-indigo-700 active:bg-indigo-800"
-				onclick={openQuick}
-			>
-				<div class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white/15">
-					<Icon name="zap" size={20} />
-				</div>
-				<div class="min-w-0 flex-1">
-					<p class="text-sm font-bold">Hızlı Akış Oluştur</p>
-					<p class="text-xs text-indigo-200">Adımları yaz, tek hamlede oluştur ve bu iş kalemine ata</p>
-				</div>
-				<Icon name="chevron-right" size={18} class="shrink-0 text-indigo-200" />
-			</button>
-		{/if}
-
-		{#if canAssignFlow && templates.length > 0}
-			<div class="my-4 flex items-center gap-3">
-				<div class="h-px flex-1 bg-slate-200"></div>
-				<span class="text-xs text-slate-400">ya da mevcut akıştan seç</span>
-				<div class="h-px flex-1 bg-slate-200"></div>
+		{#if templates.length > 0}
+			<div class="mb-2 flex items-center gap-2">
+				<Icon name="workflow" size={16} class="text-indigo-600" />
+				<p class="text-sm font-semibold">Süreç Grubu Ekle</p>
 			</div>
 		{/if}
-		<p class="text-sm text-slate-600">Bu iş kalemine akış atanmamış.</p>
-		{#if canAssignFlow && templates.length === 0}
+		<p class="text-sm text-slate-600">Bu işe henüz süreç grubu eklenmedi.</p>
+		{#if templates.length === 0}
 			<p class="mt-2 text-sm text-slate-400">
-				Yayınlanmış akış yok. Önce <strong>Ayarlar › Akışlar</strong>'dan bir akış oluşturup yayınlayın.
+				Yayınlanmış grup yok. <strong>Ayarlar › Adımlar</strong>'dan adım tanımlayıp
+				<strong>Ayarlar › Süreç Grupları</strong>'nda bir grup kurun.
 			</p>
-		{:else if canAssignFlow}
+		{:else}
 			<div class="mt-3 divide-y divide-slate-100">
 				{#each templates as t (t.id)}
 					<button
@@ -511,10 +433,11 @@
 							<p class="truncate text-sm font-medium">{t.name}</p>
 							<p class="text-xs text-slate-500">v{t.published_version} · {t.published_node_count} adım</p>
 						</div>
-						<span class="shrink-0 text-sm font-medium text-indigo-600">Ata</span>
+						<span class="shrink-0 text-sm font-medium text-indigo-600">Ekle</span>
 					</button>
 				{/each}
 			</div>
+			<p class="mt-3 text-xs text-slate-400">Adımlar ve varsayılan sorumlular otomatik gelir.</p>
 		{/if}
 	</div>
 {/if}
@@ -643,85 +566,3 @@
 </Sheet>
 
 
-<!-- Hizli akis olusturma sheet'i -->
-<Sheet bind:open={quickOpen} title="Hızlı Akış Oluştur" onclose={() => (quickOpen = false)}>
-	<form class="space-y-4" onsubmit={submitQuick}>
-		<div>
-			<label class="label" for="qf-name">Akış Adı</label>
-			<input id="qf-name" class="input" bind:value={qfName} placeholder="Örn. Tezgah Akışı" required maxlength={80} />
-		</div>
-
-		<div>
-			<label class="label" for="qf-step">Adımlar (sırayla ekleyin)</label>
-			<div class="flex gap-2">
-				<input
-					id="qf-step"
-					class="input flex-1"
-					bind:value={qfInput}
-					placeholder="Örn. Kesim"
-					onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); qfAdd(); } }}
-				/>
-				<button type="button" class="btn-secondary shrink-0 !px-4" onclick={qfAdd} disabled={!qfInput.trim() || qfSteps.length >= 20}>
-					<Icon name="plus" size={16} />
-				</button>
-			</div>
-
-			{#if qfSteps.length > 0}
-				<div class="mt-3 space-y-1.5">
-					{#each qfSteps as st, i (i)}
-						<div class="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
-							<span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-[11px] font-bold text-indigo-700">{i + 1}</span>
-							<span class="min-w-0 flex-1 truncate text-sm font-medium">{st.name}</span>
-							<button
-								type="button"
-								class="flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors {st.approval ? 'bg-violet-100 text-violet-600' : 'text-slate-300 hover:bg-slate-100 hover:text-slate-500'}"
-								onclick={() => qfToggleApproval(i)}
-								title={st.approval ? 'Onay gerekli (kapat)' : 'Onay gerekli yap'}
-							>
-								<Icon name="check-circle" size={15} />
-							</button>
-							<button
-								type="button"
-								class="flex size-9 shrink-0 items-center justify-center rounded-lg text-slate-300 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-30"
-								onclick={() => qfMoveUp(i)}
-								disabled={i === 0}
-								aria-label="Yukarı taşı"
-							>
-								<Icon name="arrow-up" size={14} />
-							</button>
-							<button
-								type="button"
-								class="flex size-9 shrink-0 items-center justify-center rounded-lg text-slate-300 hover:bg-red-50 hover:text-red-500"
-								onclick={() => qfRemove(i)}
-								aria-label="Sil"
-							>
-								<Icon name="x" size={14} />
-							</button>
-						</div>
-					{/each}
-					<p class="pt-1 text-xs text-slate-400">
-						Adımlar sırayla bağlanır: {qfSteps.map((x) => x.name).join(' › ')}
-					</p>
-				</div>
-			{:else}
-				<p class="mt-2 text-xs text-slate-400">En az 1 adım ekleyin. Örn: Kesim, İmalat, Sevkiyat</p>
-			{/if}
-		</div>
-
-		<p class="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-			Yayınlanır ve bu iş kalemine otomatik atanır. Paralel dallar ve varsayılan atanan için
-			Ayarlar → Akışlar'daki gelişmiş düzenleyiciyi kullanın.
-		</p>
-
-		{#if error}
-			<p class="form-error" role="alert">{error}</p>
-		{/if}
-
-		<div class="flex gap-2">
-			<button type="button" class="btn-secondary flex-1" onclick={() => (quickOpen = false)}>İptal</button>
-			<button type="submit" class="btn-primary flex-1" disabled={busy || !qfName.trim() || qfSteps.length === 0}>
-				{busy ? 'Oluşturuluyor…' : 'Oluştur ve Ata'}
-			</button>
-		</div>
-	</form>
-</Sheet>

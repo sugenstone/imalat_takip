@@ -14,6 +14,7 @@ pub mod permissions;
 pub mod roles;
 pub mod sections;
 pub mod state;
+pub mod steps;
 pub mod tasks;
 pub mod teams;
 pub mod util;
@@ -38,6 +39,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .merge(work_types::router())
         .merge(work_items::router())
         .merge(workflows::router())
+        .merge(steps::router())
         .merge(workflow_runtime::router())
         .merge(comments::router())
         .merge(attachments::router())

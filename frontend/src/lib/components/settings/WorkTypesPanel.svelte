@@ -267,7 +267,7 @@
 			<input id="wt-desc" class="input" bind:value={tDesc} maxlength={200} />
 		</div>
 		<div>
-			<label class="label" for="wt-flow">Varsayılan Akış (otomatik atama)</label>
+			<label class="label" for="wt-flow">Varsayılan Süreç Grubu (otomatik atama)</label>
 			<select id="wt-flow" class="input" bind:value={tDefaultFlow}>
 				<option value="">Yok</option>
 				{#each workflows as w (w.id)}

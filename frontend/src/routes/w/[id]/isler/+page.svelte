@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { api, ApiError } from '$lib/api/client';
-	import type { Section, WorkItem, WorkType, AttributeDefinition } from '$lib/api/types';
+	import type { Section, WorkItem, WorkType, AttributeDefinition, WorkflowTemplate } from '$lib/api/types';
 	import { statusLabel, statusBadgeClass, priorityLabel, priorityBadgeClass, WORK_ITEM_STATUSES, WORK_ITEM_PRIORITIES } from '$lib/api/types';
 	import { page } from '$app/state';
 	import Sheet from '$lib/components/Sheet.svelte';
@@ -32,6 +32,7 @@
 	let items = $state<WorkItem[]>([]);
 	let sections = $state<Section[]>([]);
 	let workTypes = $state<WorkType[]>([]);
+	let workflows = $state<WorkflowTemplate[]>([]);
 	let loading = $state(true);
 
 	// Ana gorunum: iscinin ekranindan yonetim listesine
@@ -71,12 +72,14 @@
 
 	async function loadMeta() {
 		try {
-			const [s, t] = await Promise.all([
+			const [s, t, w] = await Promise.all([
 				api.get<Section[]>(`/workspaces/${wid}/sections`),
-				api.get<WorkType[]>(`/workspaces/${wid}/work-types`)
+				api.get<WorkType[]>(`/workspaces/${wid}/work-types`),
+				api.get<WorkflowTemplate[]>(`/workspaces/${wid}/workflows`)
 			]);
 			sections = s;
 			workTypes = t;
+			workflows = w.filter((x) => x.published_version);
 		} catch {
 			/* layout hatayi gosterir */
 		}
@@ -188,6 +191,7 @@
 	let cSection = $state('');
 	let cSectionName = $state('');
 	let cType = $state('');
+	let cWorkflow = $state('');
 	let cName = $state('');
 	let cDesc = $state('');
 	let cPriority = $state('medium');
@@ -221,8 +225,8 @@
 	let dSectionName = $state('');
 	let dTarget = $state('leaves');
 	let dType = $state('');
+	let dWorkflow = $state('');
 	let dName = $state('{parent} İş Kalemi');
-	let dAuto = $state(true);
 	let dPickerOpen = $state(false);
 
 	async function openCreate(sectionPreset?: string) {
@@ -230,6 +234,7 @@
 		cSection = sectionPreset ?? '';
 		cSectionName = '';
 		cType = ''; // varsayilan Tipsiz — kullanici bilincli secsin (otomatik akis riski)
+		cWorkflow = '';
 		cName = '';
 		cDesc = '';
 		cPriority = 'medium';
@@ -280,6 +285,7 @@
 			await api.post(`/workspaces/${wid}/work-items`, {
 				section_id: cSection,
 				work_type_id: cType || null,
+				workflow_template_id: cWorkflow || null,
 				name: cName,
 				description: cDesc || null,
 				priority: cPriority,
@@ -336,8 +342,8 @@
 		dSection = sections[0]?.id ?? '';
 		dSectionName = '';
 		dType = ''; // varsayilan Tipsiz — yanlis otomatik akis riskini kaldirir
+		dWorkflow = '';
 		dName = '{parent} İş Kalemi';
-		dAuto = true;
 		distOpen = true;
 	}
 
@@ -353,7 +359,7 @@
 					target: dTarget,
 					work_type_id: dType || null,
 					name: dName,
-					auto_workflow: dAuto
+					workflow_template_id: dWorkflow || null
 				}
 			);
 			distOpen = false;
@@ -764,6 +770,18 @@
 			</select>
 		</div>
 		<div>
+			<label class="label" for="c-wf">Süreç Grubu (opsiyonel)</label>
+			<select id="c-wf" class="input" bind:value={cWorkflow}>
+				<option value="">Akış olmadan oluştur</option>
+				{#each workflows as g (g.id)}
+					<option value={g.id}>{g.name} · {g.published_node_count} adım</option>
+				{/each}
+			</select>
+			{#if cWorkflow}
+				<p class="mt-1.5 text-xs text-indigo-600">Grubun adımları ve sorumluları otomatik eklenecek.</p>
+			{/if}
+		</div>
+		<div>
 			<label class="label" for="c-name">Ad</label>
 			<input id="c-name" class="input" bind:value={cName} required maxlength={120} placeholder="Örn. Tezgah 1" />
 		</div>
@@ -884,7 +902,7 @@
 	<form class="space-y-4" onsubmit={submitDistribute}>
 		<p class="rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
 			Seçilen bölümün altındaki hedef bölümlere (ör. her daireye) birer iş kalemi oluşturur.
-			İş tipine varsayılan akış bağlıysa otomatik atanır.
+			Süreç grubu seçerseniz adımlar ve sorumlular otomatik eklenir.
 		</p>
 		<div>
 			<span class="label">Kök Bölüm</span>
@@ -907,7 +925,19 @@
 			</select>
 		</div>
 		<div>
-			<label class="label" for="d-type">İş Tipi</label>
+			<label class="label" for="d-wf">Süreç Grubu</label>
+			<select id="d-wf" class="input" bind:value={dWorkflow}>
+				<option value="">Akış olmadan dağıt</option>
+				{#each workflows as g (g.id)}
+					<option value={g.id}>{g.name} · {g.published_node_count} adım</option>
+				{/each}
+			</select>
+			{#if dWorkflow}
+				<p class="mt-1.5 text-xs text-indigo-600">Her iş kalemi grubun adımları ve sorumlularıyla oluşturulacak.</p>
+			{/if}
+		</div>
+		<div>
+			<label class="label" for="d-type">İş Tipi (opsiyonel)</label>
 			<select id="d-type" class="input" bind:value={dType}>
 				<option value="">Tipsiz</option>
 				{#each workTypes as t (t.id)}
@@ -923,10 +953,6 @@
 				<code class="rounded bg-slate-100 px-1">{'{n}'}</code> sıra numarası olur.
 			</p>
 		</div>
-		<label class="flex min-h-11 items-center gap-3 rounded-lg bg-slate-50 px-3 text-sm {dType ? 'text-slate-700' : 'text-slate-400'}">
-			<input type="checkbox" class="size-4 accent-indigo-600" bind:checked={dAuto} disabled={!dType} />
-			{dType ? 'Tipin varsayılan akışı varsa otomatik ata' : 'Otomatik akış için önce iş tipi seçin'}
-		</label>
 
 		{#if error}
 			<p class="form-error" role="alert">{error}</p>
